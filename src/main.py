@@ -103,6 +103,8 @@ DEFAULT_CONFIG = {
     "skill_name": "",
     "skill_en": 3,
     "skill_letters": 5,
+    "skill_manual": False,
+    "skill_manual_presses": 0,
     "replay_check": True,
     "replay_sec": 10,
     "path_prefer": ["TRAINER'S SHRINE", "SCOUT", "MYSTERY", "BLOOD ALTAR"],
@@ -214,7 +216,7 @@ def load_config() -> dict:
         return cfg
     if isinstance(data.get("hotkeys"), dict):
         cfg["hotkeys"].update({k: str(v) for k, v in data["hotkeys"].items() if k in cfg["hotkeys"]})
-    for key in ("early_mode", "play_attack", "play_dodge", "skill_on", "auto_minimize", "auto_focus_roblox",
+    for key in ("early_mode", "play_attack", "play_dodge", "skill_on", "skill_manual", "auto_minimize", "auto_focus_roblox",
                 "always_on_top", "show_outline", "webhook_log", "webhook_stuck", "welcome_done", "replay_check"):
         if key in data:
             cfg[key] = bool(data[key])
@@ -223,6 +225,7 @@ def load_config() -> dict:
     cfg["skill_name"] = str(data.get("skill_name") or "").strip()[:40]
     cfg["skill_en"] = _int(data.get("skill_en"), cfg["skill_en"])
     cfg["skill_letters"] = _int(data.get("skill_letters"), cfg["skill_letters"])
+    cfg["skill_manual_presses"] = min(50, _int(data.get("skill_manual_presses"), cfg["skill_manual_presses"]))
     cfg["replay_sec"] = max(3, _int(data.get("replay_sec"), cfg["replay_sec"]))
     for key in LIST_KEYS:
         if isinstance(data.get(key), list):
@@ -294,6 +297,8 @@ class App(tk.Tk):
         self.skill_name = tk.StringVar(value=self.cfg["skill_name"])
         self.skill_en = tk.StringVar(value=str(self.cfg["skill_en"]))
         self.skill_letters = tk.StringVar(value=str(self.cfg["skill_letters"]))
+        self.skill_manual = tk.BooleanVar(value=self.cfg["skill_manual"])
+        self.skill_manual_presses = tk.StringVar(value=str(self.cfg["skill_manual_presses"]))
         self.replay_check = tk.BooleanVar(value=self.cfg["replay_check"])
         self.replay_sec = tk.StringVar(value=str(self.cfg["replay_sec"]))
         self.auto_minimize = tk.BooleanVar(value=self.cfg["auto_minimize"])
@@ -548,9 +553,15 @@ class App(tk.Tk):
         ttk.Label(lrow, text="Letters that must match").pack(side="left")
         ttk.Entry(lrow, textvariable=self.skill_letters, width=4).pack(side="left", padx=(6, 0))
         self.skill_letters.trace_add("write", lambda *_: self._persist())
-        for r, key in enumerate(SKILL_POINTS, 5):
+        ttk.Checkbutton(skill, text="Manual select (skip skill OCR)", variable=self.skill_manual, command=self._persist).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        mrow = ttk.Frame(skill)
+        mrow.grid(row=6, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ttk.Label(mrow, text="S presses before Space").pack(side="left")
+        ttk.Entry(mrow, textvariable=self.skill_manual_presses, width=4).pack(side="left", padx=(6, 0))
+        self.skill_manual_presses.trace_add("write", lambda *_: self._persist())
+        for r, key in enumerate(SKILL_POINTS, 7):
             self._point_row(skill, key).grid(row=r, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        self._muted(skill, "Type it how it shows in game. Once that many letters of the name match a line in the skill list it picks it, and if it isn't there it presses S to scroll down (ultra skills). GUARD row is used when GUARD ! lights up.", 180).grid(row=5 + len(SKILL_POINTS), column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self._muted(skill, "Manual select presses S the chosen number of times, then Space. Otherwise, type the skill name and it finds the matching line (pressing S to scroll if needed). GUARD row is used when GUARD ! lights up.", 180).grid(row=7 + len(SKILL_POINTS), column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         replay = ttk.LabelFrame(parent, text="3. Replay check", padding=6)
         replay.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 6))
@@ -854,6 +865,8 @@ class App(tk.Tk):
             self.cfg["skill_name"] = " ".join(self.skill_name.get().split())[:40]
             self.cfg["skill_en"] = _int(self.skill_en.get(), self.cfg["skill_en"])
             self.cfg["skill_letters"] = _int(self.skill_letters.get(), self.cfg["skill_letters"])
+            self.cfg["skill_manual"] = bool(self.skill_manual.get())
+            self.cfg["skill_manual_presses"] = min(50, _int(self.skill_manual_presses.get(), self.cfg["skill_manual_presses"]))
             self.cfg["replay_check"] = bool(self.replay_check.get())
             self.cfg["replay_sec"] = max(3, _int(self.replay_sec.get(), self.cfg["replay_sec"]))
             self.cfg["auto_minimize"] = bool(self.auto_minimize.get())

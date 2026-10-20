@@ -198,7 +198,8 @@ def describe(cfg: dict, reader: Reader, grabber: Grabber) -> str:
         return "A %s bar is on screen but there's no minigame box above it to read, so it leaves it alone and keeps pressing Space." % ("dodge" if bar.kind == BAR_DODGE else "attack")
     if in_battle(frame):
         name = str(cfg.get("skill_name") or "").strip()
-        skill = bool(cfg.get("skill_on")) and bool(name)
+        manual = bool(cfg.get("skill_manual"))
+        skill = bool(cfg.get("skill_on")) and (manual or bool(name))
         gap = float(cfg["advanced"]["skill_space_sec" if skill else "battle_space_sec"])
         if back_header(frame):
             return "Battle, CHOOSE A FOE or the skill list is up. Space every %.2f s, and it clicks BACK if it sticks for %.0f s." % (gap, float(cfg["advanced"]["stuck_fix_sec"]))
@@ -214,8 +215,9 @@ def describe(cfg: dict, reader: Reader, grabber: Grabber) -> str:
         if head is None or head[0] != "menu":
             return "Battle, your turn, but the EN area read '%s' instead of EN 2/10, so it just attacks. Fix it with Select on EN area." % (text or "nothing")
         need = int(cfg.get("skill_en") or 0)
-        plan = "it goes for %s now" % name if head[1] >= need else "it attacks until EN is %d" % need
-        return "Battle, your turn. EN %d/%d, %s needs %d, %s." % (head[1], head[2], name, need, plan)
+        label = "Manual select (S %d times, then Space)" % min(50, max(0, int(cfg.get("skill_manual_presses") or 0))) if manual else name
+        plan = "it uses %s now" % label if head[1] >= need else "it attacks until EN is %d" % need
+        return "Battle, your turn. EN %d/%d, %s needs %d, %s." % (head[1], head[2], label, need, plan)
     cx0, cy0, cx1, cy1 = area_px(area_of(cfg, "continue_area"), rect.w, rect.h)
     continue_img = frame[cy0:cy1, cx0:cx1]
     continue_btn = find_button(continue_img, rect.w, rect.h)
@@ -650,15 +652,11 @@ class Runner:
 
     def _skill_set(self) -> bool:
         name = str(self.cfg.get("skill_name") or "").strip()
-        return bool(self.cfg.get("skill_on")) and bool(name) and not self._skill_off
-
-    def _skill_name(self) -> str:
-        if not self._skill_set() or time.perf_counter() < self._skill_block:
-            return ""
-        return str(self.cfg.get("skill_name") or "").strip()
+        manual = bool(self.cfg.get("skill_manual"))
+        return bool(self.cfg.get("skill_on")) and (manual or bool(name)) and (manual or not self._skill_off)
 
     def _skill_due(self, rect, frame: np.ndarray) -> bool:
-        if self._en_read or not self._skill_name():
+        if self._en_read or not self._skill_set() or time.perf_counter() < self._skill_block:
             return False
         self._en_read = True
         self._en = self._read_en(frame)
@@ -696,6 +694,18 @@ class Runner:
     def _pick_skill(self, rect, now: float, back: bool) -> None:
         wait = self._num("skill_wait_sec", 0.05)
         if now - self._skill_at < wait:
+            return
+        if bool(self.cfg.get("skill_manual")):
+            presses = min(50, max(0, int(self.cfg.get("skill_manual_presses") or 0)))
+            self.status("Manual select: pressing S %d times, then Space." % presses)
+            for _ in range(presses):
+                self._tap(False, "s")
+                if self.aborted():
+                    return
+            self._tap()
+            self.note("skill", "Manual select (%d S presses)" % presses)
+            self._skill_block = time.perf_counter() + self._num("skill_retry_sec", 0.0)
+            self._back_to_attack(rect)
             return
         name = str(self.cfg.get("skill_name") or "").strip()
         frame = self._frame(rect)
