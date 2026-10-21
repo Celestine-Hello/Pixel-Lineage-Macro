@@ -100,6 +100,11 @@ DEFAULT_CONFIG = {
     "play_attack": True,
     "play_dodge": True,
     "skill_on": False,
+    "skill_slots": [
+        {"enabled": False, "name": "", "en": 3, "cooldown": 0},
+        {"enabled": False, "name": "", "en": 3, "cooldown": 0},
+        {"enabled": False, "name": "", "en": 3, "cooldown": 0},
+    ],
     "skill_name": "",
     "skill_en": 3,
     "skill_letters": 5,
@@ -222,6 +227,26 @@ def load_config() -> dict:
             cfg[key] = bool(data[key])
     if data.get("class") in CLASSES:
         cfg["class"] = data["class"]
+    raw_slots = data.get("skill_slots")
+    if isinstance(raw_slots, list):
+        slots = []
+        for i in range(3):
+            raw = raw_slots[i] if i < len(raw_slots) and isinstance(raw_slots[i], dict) else {}
+            slots.append({
+                "enabled": bool(raw.get("enabled", False)),
+                "name": str(raw.get("name") or "").strip()[:40],
+                "en": min(99, _int(raw.get("en"), 3)),
+                "cooldown": min(999, _int(raw.get("cooldown"), 0)),
+            })
+        cfg["skill_slots"] = slots
+    else:
+        # Upgrade existing one-skill configs without changing their behavior.
+        cfg["skill_slots"][0] = {
+            "enabled": bool(data.get("skill_on", cfg["skill_slots"][0]["enabled"])),
+            "name": str(data.get("skill_name") or "").strip()[:40],
+            "en": min(99, _int(data.get("skill_en"), cfg["skill_slots"][0]["en"])),
+            "cooldown": 0,
+        }
     cfg["skill_name"] = str(data.get("skill_name") or "").strip()[:40]
     cfg["skill_en"] = _int(data.get("skill_en"), cfg["skill_en"])
     cfg["skill_letters"] = _int(data.get("skill_letters"), cfg["skill_letters"])
@@ -293,9 +318,10 @@ class App(tk.Tk):
         self.early_mode = tk.BooleanVar(value=self.cfg["early_mode"])
         self.play_attack = tk.BooleanVar(value=self.cfg["play_attack"])
         self.play_dodge = tk.BooleanVar(value=self.cfg["play_dodge"])
-        self.skill_on = tk.BooleanVar(value=self.cfg["skill_on"])
-        self.skill_name = tk.StringVar(value=self.cfg["skill_name"])
-        self.skill_en = tk.StringVar(value=str(self.cfg["skill_en"]))
+        self.skill_enabled_vars = [tk.BooleanVar(value=slot["enabled"]) for slot in self.cfg["skill_slots"]]
+        self.skill_name_vars = [tk.StringVar(value=slot["name"]) for slot in self.cfg["skill_slots"]]
+        self.skill_en_vars = [tk.StringVar(value=str(slot["en"])) for slot in self.cfg["skill_slots"]]
+        self.skill_cooldown_vars = [tk.StringVar(value=str(slot["cooldown"])) for slot in self.cfg["skill_slots"]]
         self.skill_letters = tk.StringVar(value=str(self.cfg["skill_letters"]))
         self.skill_manual = tk.BooleanVar(value=self.cfg["skill_manual"])
         self.skill_manual_presses = tk.StringVar(value=str(self.cfg["skill_manual_presses"]))
@@ -539,29 +565,36 @@ class App(tk.Tk):
 
         skill = ttk.LabelFrame(parent, text="2. Skill", padding=6)
         skill.grid(row=1, column=1, sticky="nsew", padx=(3, 0), pady=(0, 6))
-        ttk.Checkbutton(skill, text="Use a skill", variable=self.skill_on, command=self._persist).grid(row=0, column=0, columnspan=2, sticky="w")
-        ttk.Label(skill, text="Skill name").grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        ttk.Entry(skill, textvariable=self.skill_name, width=20).grid(row=2, column=0, columnspan=2, sticky="w")
-        self.skill_name.trace_add("write", lambda *_: self._persist())
-        erow = ttk.Frame(skill)
-        erow.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        ttk.Label(erow, text="When EN is at least").pack(side="left")
-        ttk.Entry(erow, textvariable=self.skill_en, width=4).pack(side="left", padx=(6, 0))
-        self.skill_en.trace_add("write", lambda *_: self._persist())
+        for i, title in enumerate(("Skill 1", "Skill 2", "Skill 3")):
+            slot = ttk.LabelFrame(skill, text=title, padding=(4, 2))
+            slot.grid(row=i, column=0, columnspan=2, sticky="ew", pady=(0 if i == 0 else 4, 0))
+            ttk.Checkbutton(slot, text="Use", variable=self.skill_enabled_vars[i], command=self._persist).grid(
+                row=0, column=0, sticky="w"
+            )
+            ttk.Label(slot, text="Name").grid(row=1, column=0, sticky="w")
+            ttk.Entry(slot, textvariable=self.skill_name_vars[i], width=18).grid(row=1, column=1, sticky="ew")
+            ttk.Label(slot, text="EN ≥").grid(row=2, column=0, sticky="w", pady=(2, 0))
+            ttk.Entry(slot, textvariable=self.skill_en_vars[i], width=4).grid(row=2, column=1, sticky="w", pady=(2, 0))
+            ttk.Label(slot, text="Cooldown (turns)").grid(row=3, column=0, sticky="w", pady=(2, 0))
+            ttk.Entry(slot, textvariable=self.skill_cooldown_vars[i], width=4).grid(row=3, column=1, sticky="w", pady=(2, 0))
+            slot.columnconfigure(1, weight=1)
+            self.skill_name_vars[i].trace_add("write", lambda *_: self._persist())
+            self.skill_en_vars[i].trace_add("write", lambda *_: self._persist())
+            self.skill_cooldown_vars[i].trace_add("write", lambda *_: self._persist())
         lrow = ttk.Frame(skill)
-        lrow.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        lrow.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ttk.Label(lrow, text="Letters that must match").pack(side="left")
         ttk.Entry(lrow, textvariable=self.skill_letters, width=4).pack(side="left", padx=(6, 0))
         self.skill_letters.trace_add("write", lambda *_: self._persist())
-        ttk.Checkbutton(skill, text="Manual select (skip skill OCR)", variable=self.skill_manual, command=self._persist).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(skill, text="Manual select Skill 1 (skip OCR)", variable=self.skill_manual, command=self._persist).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
         mrow = ttk.Frame(skill)
-        mrow.grid(row=6, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        mrow.grid(row=5, column=0, columnspan=2, sticky="w", pady=(2, 0))
         ttk.Label(mrow, text="S presses before Space").pack(side="left")
         ttk.Entry(mrow, textvariable=self.skill_manual_presses, width=4).pack(side="left", padx=(6, 0))
         self.skill_manual_presses.trace_add("write", lambda *_: self._persist())
-        for r, key in enumerate(SKILL_POINTS, 7):
+        for r, key in enumerate(SKILL_POINTS, 6):
             self._point_row(skill, key).grid(row=r, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        self._muted(skill, "Manual select presses S the chosen number of times, then Space. Otherwise, type the skill name and it finds the matching line (pressing S to scroll if needed). GUARD row is used when GUARD ! lights up.", 180).grid(row=7 + len(SKILL_POINTS), column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self._muted(skill, "Checks enabled skills in order; it uses the first whose EN and cooldown allow it. Cooldown counts attack, skill, and guard actions. Manual select applies to Skill 1.", 180).grid(row=6 + len(SKILL_POINTS), column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         replay = ttk.LabelFrame(parent, text="3. Replay check", padding=6)
         replay.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 6))
@@ -861,9 +894,19 @@ class App(tk.Tk):
             self.cfg["early_mode"] = bool(self.early_mode.get())
             self.cfg["play_attack"] = bool(self.play_attack.get())
             self.cfg["play_dodge"] = bool(self.play_dodge.get())
-            self.cfg["skill_on"] = bool(self.skill_on.get())
-            self.cfg["skill_name"] = " ".join(self.skill_name.get().split())[:40]
-            self.cfg["skill_en"] = _int(self.skill_en.get(), self.cfg["skill_en"])
+            slots = []
+            for i in range(3):
+                slots.append({
+                    "enabled": bool(self.skill_enabled_vars[i].get()),
+                    "name": " ".join(self.skill_name_vars[i].get().split())[:40],
+                    "en": min(99, _int(self.skill_en_vars[i].get(), self.cfg["skill_slots"][i]["en"])),
+                    "cooldown": min(999, _int(self.skill_cooldown_vars[i].get(), self.cfg["skill_slots"][i]["cooldown"])),
+                })
+            self.cfg["skill_slots"] = slots
+            # Keep the old single-skill fields synchronized for older configs/tools.
+            self.cfg["skill_on"] = slots[0]["enabled"]
+            self.cfg["skill_name"] = slots[0]["name"]
+            self.cfg["skill_en"] = slots[0]["en"]
             self.cfg["skill_letters"] = _int(self.skill_letters.get(), self.cfg["skill_letters"])
             self.cfg["skill_manual"] = bool(self.skill_manual.get())
             self.cfg["skill_manual_presses"] = min(50, _int(self.skill_manual_presses.get(), self.cfg["skill_manual_presses"]))
@@ -1201,9 +1244,9 @@ class App(tk.Tk):
                 return "EN %d/%d (read: %s)" % (head[1], head[2], text)
             return "No EN read (read: %s)" % (text or self._reader.why or "nothing")
         if key == "skills_area":
-            name = self.cfg.get("skill_name") or ""
-            line = skill_line(lines, name, int(self.cfg.get("skill_letters") or 0)) if name else None
-            found = (" Found %s." % name) if line else (" %s not found." % name if name else "")
+            configured = [slot["name"] for slot in self.cfg.get("skill_slots", []) if slot.get("enabled") and slot.get("name")]
+            checks = ["%s: %s" % (name, "found" if skill_line(lines, name, int(self.cfg.get("skill_letters") or 0)) else "not found") for name in configured]
+            found = (" " + "; ".join(checks)) if checks else ""
             return "Skill list read: %s.%s" % (text or "nothing", found)
         if key == "path_area":
             cards = find_cards(img, origin.h)

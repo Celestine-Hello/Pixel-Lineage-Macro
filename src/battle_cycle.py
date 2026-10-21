@@ -164,6 +164,18 @@ def choose(cards: list[Box], lines: list[Line], cfg: dict) -> int | None:
     return min(scored)[1]
 
 
+def configured_skills(cfg: dict) -> list[dict]:
+    slots = cfg.get("skill_slots")
+    if isinstance(slots, list):
+        return (slots + [{"enabled": False, "name": "", "en": 3, "cooldown": 0}] * 3)[:3]
+    return [
+        {"enabled": bool(cfg.get("skill_on")), "name": cfg.get("skill_name", ""),
+         "en": cfg.get("skill_en", 3), "cooldown": 0},
+        {"enabled": False, "name": "", "en": 3, "cooldown": 0},
+        {"enabled": False, "name": "", "en": 3, "cooldown": 0},
+    ]
+
+
 def read_card_lines(reader: Reader, img: np.ndarray, cards: list[Box]) -> list[Line]:
     """OCR the detected cards instead of the full configurable path-screen area."""
     if img is None or img.size == 0 or not cards:
@@ -197,9 +209,10 @@ def describe(cfg: dict, reader: Reader, grabber: Grabber) -> str:
     if bar is not None:
         return "A %s bar is on screen but there's no minigame box above it to read, so it leaves it alone and keeps pressing Space." % ("dodge" if bar.kind == BAR_DODGE else "attack")
     if in_battle(frame):
-        name = str(cfg.get("skill_name") or "").strip()
         manual = bool(cfg.get("skill_manual"))
-        skill = bool(cfg.get("skill_on")) and (manual or bool(name))
+        slots = configured_skills(cfg)
+        skill = any(bool(slot.get("enabled")) and (bool(str(slot.get("name") or "").strip()) or (i == 0 and manual))
+                    for i, slot in enumerate(slots))
         gap = float(cfg["advanced"]["skill_space_sec" if skill else "battle_space_sec"])
         if back_header(frame):
             return "Battle, CHOOSE A FOE or the skill list is up. Space every %.2f s, and it clicks BACK if it sticks for %.0f s." % (gap, float(cfg["advanced"]["stuck_fix_sec"]))
@@ -214,10 +227,16 @@ def describe(cfg: dict, reader: Reader, grabber: Grabber) -> str:
         head = parse_header(text)
         if head is None or head[0] != "menu":
             return "Battle, your turn, but the EN area read '%s' instead of EN 2/10, so it just attacks. Fix it with Select on EN area." % (text or "nothing")
-        need = int(cfg.get("skill_en") or 0)
-        label = "Manual select (S %d times, then Space)" % min(50, max(0, int(cfg.get("skill_manual_presses") or 0))) if manual else name
-        plan = "it uses %s now" % label if head[1] >= need else "it attacks until EN is %d" % need
-        return "Battle, your turn. EN %d/%d, %s needs %d, %s." % (head[1], head[2], label, need, plan)
+        ready = [(i, slot) for i, slot in enumerate(slots)
+                 if slot.get("enabled") and (str(slot.get("name") or "").strip() or (i == 0 and manual))
+                 and head[1] >= int(slot.get("en") or 0)]
+        if ready:
+            i, slot = ready[0]
+            label = "Manual Skill 1" if i == 0 and manual else str(slot.get("name") or "Skill %d" % (i + 1))
+            return "Battle, your turn. EN %d/%d, it would use Skill %d (%s)." % (head[1], head[2], i + 1, label)
+        next_en = min((int(slot.get("en") or 0) for i, slot in enumerate(slots)
+                       if slot.get("enabled") and (str(slot.get("name") or "").strip() or (i == 0 and manual))), default=0)
+        return "Battle, your turn. EN %d/%d, it attacks until an enabled skill's EN minimum (%d) is met." % (head[1], head[2], next_en)
     cx0, cy0, cx1, cy1 = area_px(area_of(cfg, "continue_area"), rect.w, rect.h)
     continue_img = frame[cy0:cy1, cx0:cx1]
     continue_btn = find_button(continue_img, rect.w, rect.h)
@@ -299,6 +318,7 @@ class Runner:
         self._chest_tries = 0
         self._continue_tries = 0
         self._continue_retry_at = 0.0
+        self._continue_path_watch_until = 0.0
         self._retry_at = 0.0
         self._retry_tries = 0
         self._next_chest = 0.0
@@ -311,8 +331,11 @@ class Runner:
         self._nudges = 0
         self._en: tuple[int, int] | None = None
         self._en_read = False
-        self._skill_off = False
-        self._skill_block = 0.0
+        self._skill_off: set[int] = set()
+        self._skill_block = [0.0, 0.0, 0.0]
+        self._skill_candidate: int | None = None
+        self._turn_actions = 0
+        self._skill_ready_after = [0, 0, 0]
         self._skill_at = 0.0
         self._skill_tries = 0
         self._mg_block = 0.0
@@ -605,6 +628,8 @@ class Runner:
         else:
             self.status("In a fight, Space.")
         self._tap(False)
+        if turn:
+            self._record_turn_action()
         self._next_space = time.perf_counter() + self._pace(turn)
 
     def _guard_up(self, frame: np.ndarray) -> bool:
@@ -630,10 +655,12 @@ class Runner:
             self.status("GUARD ! is up and Space didn't take, clicking GUARD.")
             self._click_point(rect, "guard_btn")
             self._hover = "guard_btn"
+            self._record_turn_action()
         else:
             self.status("GUARD ! is up, guarding.")
             self._face(rect, "guard_btn")
             self._tap()
+            self._record_turn_action()
         if self._guard_tries == 1:
             self.note("guard", "")
         self._next_space = time.perf_counter() + max(0.35, self._pace())
@@ -651,24 +678,50 @@ class Runner:
         hover_at(*self._abs(rect, point_of(self.cfg, key)))
 
     def _skill_set(self) -> bool:
-        name = str(self.cfg.get("skill_name") or "").strip()
         manual = bool(self.cfg.get("skill_manual"))
-        return bool(self.cfg.get("skill_on")) and (manual or bool(name)) and (manual or not self._skill_off)
+        return any(bool(slot.get("enabled"))
+                   and (bool(str(slot.get("name") or "").strip()) or (i == 0 and manual))
+                   and i not in self._skill_off
+                   for i, slot in enumerate(configured_skills(self.cfg)))
+
+    def _record_turn_action(self, skill_index: int | None = None) -> None:
+        self._turn_actions += 1
+        if skill_index is not None:
+            slot = configured_skills(self.cfg)[skill_index]
+            cooldown = max(0, int(slot.get("cooldown") or 0))
+            self._skill_ready_after[skill_index] = self._turn_actions + cooldown
+
+    def _reset_encounter_skill_cooldowns(self) -> None:
+        self._turn_actions = 0
+        self._skill_ready_after = [0, 0, 0]
+        self._skill_block = [0.0, 0.0, 0.0]
 
     def _skill_due(self, rect, frame: np.ndarray) -> bool:
-        if self._en_read or not self._skill_set() or time.perf_counter() < self._skill_block:
+        if self._en_read or not self._skill_set():
             return False
         self._en_read = True
         self._en = self._read_en(frame)
         if self._en is None:
             self.status("Your turn, couldn't read your EN, attacking.")
             return False
-        if self._en[0] < int(self.cfg.get("skill_en") or 0):
-            return False
-        self._mode = OPEN
-        self._skill_at = 0.0
-        self._skill_tries = 0
-        return True
+        now = time.perf_counter()
+        manual = bool(self.cfg.get("skill_manual"))
+        for i, slot in enumerate(configured_skills(self.cfg)):
+            name = str(slot.get("name") or "").strip()
+            if not slot.get("enabled") or i in self._skill_off:
+                continue
+            if not name and not (i == 0 and manual):
+                continue
+            if self._turn_actions < self._skill_ready_after[i] or now < self._skill_block[i]:
+                continue
+            if self._en[0] < max(0, int(slot.get("en") or 0)):
+                continue
+            self._skill_candidate = i
+            self._mode = OPEN
+            self._skill_at = 0.0
+            self._skill_tries = 0
+            return True
+        return False
 
     def _read_en(self, frame: np.ndarray) -> tuple[int, int] | None:
         img, _x, _y = crop(frame, area_of(self.cfg, "en_area"))
@@ -695,7 +748,7 @@ class Runner:
         wait = self._num("skill_wait_sec", 0.05)
         if now - self._skill_at < wait:
             return
-        if bool(self.cfg.get("skill_manual")):
+        if bool(self.cfg.get("skill_manual")) and self._skill_candidate == 0:
             presses = min(50, max(0, int(self.cfg.get("skill_manual_presses") or 0)))
             self.status("Manual select: pressing S %d times, then Space." % presses)
             for _ in range(presses):
@@ -703,11 +756,21 @@ class Runner:
                 if self.aborted():
                     return
             self._tap()
+            self._record_turn_action(0)
             self.note("skill", "Manual select (%d S presses)" % presses)
-            self._skill_block = time.perf_counter() + self._num("skill_retry_sec", 0.0)
+            self._skill_block[0] = time.perf_counter() + self._num("skill_retry_sec", 0.0)
             self._back_to_attack(rect)
             return
-        name = str(self.cfg.get("skill_name") or "").strip()
+        idx = self._skill_candidate
+        if idx is None:
+            self._drop_skill(rect, "No active skill was selected, back to attacking.", False)
+            return
+        slot = configured_skills(self.cfg)[idx]
+        name = str(slot.get("name") or "").strip()
+        if not name:
+            self._skill_off.add(idx)
+            self._drop_skill(rect, "Skill %d has no name, skipping it." % (idx + 1), False)
+            return
         frame = self._frame(rect)
         if frame is None:
             if now - self._skill_at > wait * 4:
@@ -728,16 +791,17 @@ class Runner:
                 self._tap(False, "s")
                 self._skill_at = time.perf_counter()
                 return
-            self.status("%s isn't in the skill list, skills are off until you press F1 again." % name)
-            self._skill_off = True
+            self.status("%s isn't in the skill list, skipping Skill %d for this run." % (name, idx + 1))
+            self._skill_off.add(idx)
             self._drop_skill(rect, "", back)
             return
         self.status("Using %s." % name)
         hover_at(rect.x + ax + line.x + min(line.w // 3, 60), rect.y + ay + line.cy)
         time.sleep(0.08)
         self._tap()
+        self._record_turn_action(idx)
         self.note("skill", name)
-        self._skill_block = time.perf_counter() + self._num("skill_retry_sec", 0.0)
+        self._skill_block[idx] = time.perf_counter() + self._num("skill_retry_sec", 0.0)
         self._back_to_attack(rect)
 
     def _drop_skill(self, rect, msg: str, back: bool) -> None:
@@ -745,7 +809,8 @@ class Runner:
             self.status(msg)
         if back:
             self._click_point(rect, "back_btn")
-        self._skill_block = time.perf_counter() + self._num("skill_retry_sec", 0.0)
+        if self._skill_candidate is not None:
+            self._skill_block[self._skill_candidate] = time.perf_counter() + self._num("skill_retry_sec", 0.0)
         self._back_to_attack(rect)
 
     def _back_to_attack(self, rect) -> None:
@@ -753,6 +818,7 @@ class Runner:
         self._scrolls = 0
         self._skill_at = 0.0
         self._skill_tries = 0
+        self._skill_candidate = None
         self._en = None
         self._en_read = True
         self._menu_at = 0.0
@@ -797,12 +863,20 @@ class Runner:
         self._tap(False)
 
     def _menus(self, rect, frame: np.ndarray, now: float) -> bool:
+        # After Continue, watch for the path screen on each normal poll. The
+        # regular path detection below remains active even after this window.
+        if now < self._continue_path_watch_until and path_banner(frame):
+            self._continue_path_watch_until = 0.0
+            self._screen("path")
+            self._path(rect, fast=True)
+            return True
+
         # Mini-boss Continue gets its own adjustable detection region.
         cx0, cy0, cx1, cy1 = area_px(area_of(self.cfg, "continue_area"), rect.w, rect.h)
         continue_img = frame[cy0:cy1, cx0:cx1]
         continue_btn = find_button(continue_img, rect.w, rect.h)
         if continue_btn is not None:
-            label = " ".join(ln.text for ln in self.reader.read(continue_img))
+            label = "" if self._last_screen == "continue" else " ".join(ln.text for ln in self.reader.read(continue_img))
             # OCR can miss the label on later frames after the first click.
             # Once confirmed, keep retrying while the active button remains
             # inside the dedicated area.
@@ -812,8 +886,8 @@ class Runner:
                 self._screen("continue")
                 now = time.perf_counter()
                 if self._continue_retry_at and now - self._continue_retry_at < 4.0:
-                    self.status("CONTINUE is still on screen, checking again in %.1f sec." % (4.0 - (now - self._continue_retry_at)))
-                    self._sleep(4.0 - (now - self._continue_retry_at))
+                    self.status("CONTINUE is still on screen, watching for the path screen.")
+                    self._sleep(min(0.10, 4.0 - (now - self._continue_retry_at)))
                     return True
                 self._continue_tries += 1
                 cx, cy = rect.x + cx0 + continue_btn.box.cx, rect.y + cy0 + continue_btn.box.cy
@@ -827,7 +901,8 @@ class Runner:
                 self._progress()
                 self.note("action", "")
                 self._continue_retry_at = time.perf_counter()
-                self._sleep(4.0)
+                self._continue_path_watch_until = self._continue_retry_at + 12.0
+                self._sleep(0.10)
                 return True
         for area_key, expected, title in (("skip_area", "skip", "SKIP"), ("follow_light_area", "follow_light", "FOLLOW THE LIGHT")):
             ax0, ay0, ax1, ay1 = area_px(area_of(self.cfg, area_key), rect.w, rect.h)
@@ -1030,13 +1105,16 @@ class Runner:
         self._sleep(1.0)
         return True
 
-    def _path(self, rect) -> None:
+    def _path(self, rect, fast: bool = False) -> None:
         now = time.perf_counter()
         if self._path_at and now - self._path_at < self._num("path_retry_sec", 0.5):
             self.status("Choose Your Path, waiting for the pick to go through...")
             return
         self.status("Choose Your Path, reading the paths...")
-        if self._sleep(self._num("path_settle_sec", 0.0)):
+        settle = self._num("path_settle_sec", 0.0)
+        if fast:
+            settle = min(settle, 0.12)
+        if self._sleep(settle):
             return
         frame = self._frame(rect)
         if frame is None or not path_banner(frame):
@@ -1059,6 +1137,7 @@ class Runner:
             self._click_point_at(rect, USUAL_CARDS[spot])
             if tries == 1:
                 self.note("path", "path %d" % (spot + 1))
+                self._reset_encounter_skill_cooldowns()
             self._path_at = time.perf_counter()
             self._sleep(self._num("after_pick_sec", 0.0))
             return
@@ -1076,6 +1155,7 @@ class Runner:
             self._click(rect, px + card.cx, py + card.cy)
         if tries == 1:
             self.note("path", title)
+        self._reset_encounter_skill_cooldowns()
         self._path_at = time.perf_counter()
         self._sleep(self._num("after_pick_sec", 0.0))
 

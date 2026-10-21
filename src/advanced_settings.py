@@ -100,7 +100,7 @@ ADVANCED_SECTIONS: list[tuple[str, list[tuple[str, str, str]]]] = [
             ("skill_wait_sec", "Skill menu wait (sec)",
              "Wait after opening Skills before it reads the skill list"),
             ("skill_retry_sec", "Skill retry (sec)",
-             "How long it waits after going for a skill before it goes for one again"),
+             "Minimum delay before the same skill slot is checked again, alongside that skill's turn cooldown"),
             ("skill_scroll_max", "Skill list S presses",
              "If your skill isn't in the list it presses S this many times, one at a time, reading the list after each, to scroll down to skills further down (ultra skills)"),
             ("chest_check_sec", "Chest check every (sec)",
